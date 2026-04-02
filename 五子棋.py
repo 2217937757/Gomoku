@@ -1,6 +1,7 @@
 import pygame
 import sys
 import math
+import threading  # 用于后台计算
 
 # ====================== 配置 ======================
 BOARD_SIZE = 15
@@ -60,6 +61,7 @@ class GameTimer:
         self.ai_time = 0
         self.start_time = 0
         self.is_running = False
+        self.last_move_time = 0  # 最后一步用时
     
     def start(self):
         self.start_time = pygame.time.get_ticks()
@@ -69,8 +71,21 @@ class GameTimer:
         if self.is_running:
             elapsed = (pygame.time.get_ticks() - self.start_time) / 1000.0
             if elapsed < 100:  # 防止溢出
+                self.last_move_time = elapsed
                 self.player_time += elapsed
         self.is_running = False
+    
+    def lap(self, is_ai=False):
+        """计圈，记录当前步用时"""
+        if self.is_running:
+            elapsed = (pygame.time.get_ticks() - self.start_time) / 1000.0
+            if elapsed < 100:
+                self.last_move_time = elapsed
+                if is_ai:
+                    self.ai_time += elapsed
+                else:
+                    self.player_time += elapsed
+                self.start_time = pygame.time.get_ticks()
     
     def get_player_time(self):
         if self.is_running:
@@ -80,6 +95,7 @@ class GameTimer:
     def reset(self):
         self.player_time = 0
         self.ai_time = 0
+        self.last_move_time = 0
         self.is_running = False
     
     def format_time(self, seconds):
@@ -102,6 +118,12 @@ class GomokuGame:
         
         self.sound_manager = SoundManager()
         self.timer = GameTimer()
+        self.move_records = []  # 棋谱记录
+        
+        # AI 相关
+        self.ai_thinking = False
+        self.ai_move_result = None
+        self.ai_thread = None
         
         # UI 相关
         self.popup_show = False
@@ -125,7 +147,7 @@ class GomokuGame:
         
         # 菜单项
         self.main_menu = [
-            {"name": "游戏", "items": ["新游戏", "悔棋", "难度", "退出"]},
+            {"name": "游戏", "items": ["新游戏", "悔棋", "难度", "保存棋谱", "退出"]},
             {"name": "帮助", "items": ["关于"]}
         ]
     
@@ -215,19 +237,27 @@ class GomokuGame:
     
     def menu_act(self, m, i):
         """执行菜单动作"""
-        if m == 0:  # 游戏菜单
-            if i == 0:  # 新游戏
-                self.restart()
-            elif i == 1:  # 悔棋
-                self.undo()
-            elif i == 2:  # 难度
-                self.toggle_difficulty()
-            elif i == 3:  # 退出
-                pygame.quit()
-                sys.exit()
-        elif m == 1:  # 帮助菜单
-            if i == 0:  # 关于
-                self.show_about()
+        try:
+            if m == 0:  # 游戏菜单
+                if i == 0:  # 新游戏
+                    self.restart()
+                elif i == 1:  # 悔棋
+                    self.undo()
+                elif i == 2:  # 难度
+                    self.toggle_difficulty()
+                elif i == 3:  # 保存棋谱
+                    self.save_game_record()
+                elif i == 4:  # 退出
+                    pygame.quit()
+                    sys.exit()
+            elif m == 1:  # 帮助菜单
+                if i == 0:  # 关于
+                    self.show_about()
+        except Exception as e:
+            print(f"菜单操作出错：{type(e).__name__}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            self.show_message(f"操作失败:\n{type(e).__name__}\n{str(e)}")
     
     def toggle_difficulty(self):
         """切换难度"""
@@ -237,7 +267,113 @@ class GomokuGame:
     
     def show_about(self):
         """显示关于信息"""
-        self.show_message("五子棋 v2.0\n作者：AI 助手\n\n功能：人机对战、悔棋、难度选择")
+        self.show_message("五子棋 v2.0\n作者：AI 助手\n\n功能：人机对战、悔棋、难度选择\n       保存棋谱、思考时间显示")
+    
+    def auto_save_record(self, force_save=False):
+        """自动保存棋谱（静默保存，不显示提示）
+        
+        Args:
+            force_save: 是否强制保存（游戏结束时使用）
+        """
+        if not self.move_records:
+            return
+        
+        # 游戏进行中不保存，只在游戏结束时保存
+        if not force_save and self.game_state == GAME_RUNNING:
+            return
+        
+        try:
+            import os
+            import time
+            
+            # 使用时间戳文件名，格式：gomoku_20240402_143052.txt
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join(os.getcwd(), f"gomoku_{timestamp}.txt")
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write("╔══════════════════════════════════════════╗\n")
+                f.write("║          五子棋棋谱                      ║\n")
+                f.write("╚══════════════════════════════════════════╝\n\n")
+                f.write(f"对局时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"总步数：{self.step}\n")
+                result_text = '🏆 玩家获胜' if self.game_state == PLAYER_WIN else '🤖 AI 获胜' if self.game_state == AI_WIN else '🤝 平局'
+                f.write(f"结果：{result_text}\n")
+                f.write(f"玩家用时：{self.timer.format_time(self.timer.player_time)}\n")
+                f.write(f"AI 用时：{self.timer.format_time(self.timer.ai_time)}\n")
+                f.write(f"难度：{'困难 🔴' if self.ai_difficulty == 2 else '简单 🟢'}\n")
+                f.write(f"保存时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("\n" + "═" * 50 + "\n\n")
+                
+                for i, record in enumerate(self.move_records, 1):
+                    move_type = "● 玩家" if record['player'] == PLAYER else "○ AI"
+                    time_used = record.get('time', 0)
+                    f.write(f"第{i:3d}步 {move_type:6s} -> {record['coord']:4s} "
+                           f"(用时：{time_used:>5.2f}秒)\n")
+            
+            # 只在控制台输出，不弹窗提示
+            print(f"[自动保存] 对局结束 -> {filename.split(os.sep)[-1]}")
+            
+        except Exception as e:
+            # 自动保存失败不弹窗，只记录日志
+            print(f"[自动保存失败] {type(e).__name__}: {str(e)}")
+    
+    def save_game_record(self):
+        """手动保存棋谱到文件（带提示）"""
+        if not self.move_records:
+            self.show_message("还没有落子记录\n请先开始游戏")
+            return
+        
+        try:
+            import os
+            import time
+            
+            # 生成带时间戳的文件名，格式：gomoku_20240402_143052.txt
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join(os.getcwd(), f"gomoku_{timestamp}.txt")
+            
+            print(f"准备保存棋谱到：{filename}")
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write("╔══════════════════════════════════════════╗\n")
+                f.write("║          五子棋棋谱                      ║\n")
+                f.write("╚══════════════════════════════════════════╝\n\n")
+                f.write(f"对局时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"总步数：{self.step}\n")
+                result_text = '🏆 玩家获胜' if self.game_state == PLAYER_WIN else '🤖 AI 获胜' if self.game_state == AI_WIN else '🤝 平局'
+                f.write(f"结果：{result_text}\n")
+                f.write(f"玩家用时：{self.timer.format_time(self.timer.player_time)}\n")
+                f.write(f"AI 用时：{self.timer.format_time(self.timer.ai_time)}\n")
+                f.write(f"难度：{'困难 🔴' if self.ai_difficulty == 2 else '简单 🟢'}\n")
+                f.write("\n" + "═" * 50 + "\n\n")
+                
+                for i, record in enumerate(self.move_records, 1):
+                    move_type = "● 玩家" if record['player'] == PLAYER else "○ AI"
+                    time_used = record.get('time', 0)
+                    f.write(f"第{i:3d}步 {move_type:6s} -> {record['coord']:4s} "
+                           f"(用时：{time_used:>5.2f}秒)\n")
+            
+            # 关闭弹窗，避免重复显示
+            self.popup_show = False
+            
+            # 简洁的提示信息
+            self.show_message("✓ 保存成功！")
+            
+            print(f"✓ 棋谱已保存到：{filename}")
+            
+        except PermissionError as e:
+            error_msg = f"❌ 保存失败\n\n没有写入权限\n请检查文件夹权限设置"
+            self.show_message(error_msg)
+            print(f"✗ 保存棋谱失败（权限错误）：{str(e)}")
+        except FileNotFoundError as e:
+            error_msg = f"❌ 保存失败\n\n路径不存在\n{str(e)}"
+            self.show_message(error_msg)
+            print(f"✗ 保存棋谱失败（路径错误）：{str(e)}")
+        except Exception as e:
+            error_msg = f"❌ 保存失败\n\n{type(e).__name__}\n{str(e)}"
+            self.show_message(error_msg)
+            print(f"✗ 保存棋谱失败（未知错误）：{str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def draw_piece(self, x, y, is_black):
         """绘制棋子（带立体效果）"""
@@ -393,7 +529,7 @@ class GomokuGame:
         return 0
 
     def ai_move(self, b):
-        """AI 决策落子位置"""
+        """AI 决策落子位置（可在后台运行）"""
         best_score = -1
         best_x, best_y = 7, 7
         candidates = set()
@@ -426,15 +562,24 @@ class GomokuGame:
         
         return best_x, best_y
     
+    def calculate_ai_move_async(self):
+        """在后台线程中计算 AI 落子"""
+        self.ai_move_result = self.ai_move(self.board)
+        self.ai_thinking = False
+    
     def restart(self):
         """重新开始游戏"""
         self.board = [[EMPTY] * BOARD_SIZE for _ in range(BOARD_SIZE)]
         self.history = []
+        self.move_records = []
         self.game_state = GAME_RUNNING
         self.current_player = PLAYER
         self.step = 0
         self.winner = EMPTY
         self.timer.reset()
+        self.ai_thinking = False
+        self.ai_move_result = None
+        self.ai_thread = None
         print("=== 新游戏开始 ===")
     
     def undo(self):
@@ -473,9 +618,25 @@ class GomokuGame:
     
     def draw_info(self):
         """绘制游戏信息（步数、时间）"""
-        info_text = f"步数：{self.step}  |  用时：{self.timer.format_time(self.timer.get_player_time())}"
+        # 精简显示格式，避免溢出
+        player_time_str = self.timer.format_time(self.timer.get_player_time())
+        ai_time_str = self.timer.format_time(self.timer.ai_time)
+        
+        info_text = f"步数:{self.step} | 玩家:{player_time_str} | AI:{ai_time_str}"
         info_surf = self.font_small.render(info_text, True, (0, 0, 0))
-        self.screen.blit(info_surf, (SCREEN_WIDTH - 150, SCREEN_HEIGHT - 20))
+        
+        # 动态调整位置，确保不溢出
+        text_width = info_surf.get_width()
+        x_pos = max(10, SCREEN_WIDTH - text_width - 10)
+        self.screen.blit(info_surf, (x_pos, SCREEN_HEIGHT - 20))
+        
+        # 显示最后一步用时（左侧）
+        if self.move_records:
+            last_record = self.move_records[-1]
+            player_name = '玩家' if last_record['player'] == PLAYER else 'AI'
+            time_text = f"上步:{player_name} {last_record['time']:.1f}秒"
+            time_surf = self.font_small.render(time_text, True, (0, 0, 0))
+            self.screen.blit(time_surf, (10, SCREEN_HEIGHT - 20))
 
     def run(self):
         """游戏主循环"""
@@ -510,48 +671,92 @@ class GomokuGame:
                     
                     if 0 <= x < BOARD_SIZE and 0 <= y < BOARD_SIZE and self.board[y][x] == EMPTY:
                         # 玩家落子
+                        self.timer.lap(is_ai=False)
+                        move_time = self.timer.last_move_time
+                        
                         self.step += 1
                         self.board[y][x] = PLAYER
                         self.history.append((x, y))
                         self.sound_manager.play_click()
                         
                         coord = f"{chr(65 + x)}{y + 1}"
-                        print(f"第 {self.step} 步：玩家 -> {coord}")
+                        record = {
+                            'step': self.step,
+                            'player': PLAYER,
+                            'coord': coord,
+                            'time': move_time
+                        }
+                        self.move_records.append(record)
+                        print(f"第 {self.step} 步：玩家 -> {coord} (用时：{move_time:.2f}秒)")
+                        
+                        # 自动保存棋谱
+                        self.auto_save_record()
                         
                         if self.check_win(self.board, x, y, PLAYER):
                             self.game_state = PLAYER_WIN
                             self.winner = PLAYER
                             self.timer.stop()
                             print("*** 玩家获胜！ ***")
+                            # 游戏结束，自动保存完整棋谱
+                            self.auto_save_record(force_save=True)
                         elif self.step == BOARD_SIZE * BOARD_SIZE:
                             self.game_state = DRAW
                             self.timer.stop()
                             print("*** 平局！ ***")
+                            # 游戏结束，自动保存完整棋谱
+                            self.auto_save_record(force_save=True)
                         else:
                             self.current_player = AI
             
-            # AI 回合
-            if self.game_state == GAME_RUNNING and self.current_player == AI:
-                ax, ay = self.ai_move(self.board)
-                self.step += 1
-                self.board[ay][ax] = AI
-                self.history.append((ax, ay))
-                self.sound_manager.play_click()
-                
-                coord = f"{chr(65 + ax)}{ay + 1}"
-                print(f"第 {self.step} 步：AI -> {coord}")
-                
-                if self.check_win(self.board, ax, ay, AI):
-                    self.game_state = AI_WIN
-                    self.winner = AI
-                    self.timer.stop()
-                    print("*** AI 获胜！ ***")
-                elif self.step == BOARD_SIZE * BOARD_SIZE:
-                    self.game_state = DRAW
-                    self.timer.stop()
-                    print("*** 平局！ ***")
-                else:
-                    self.current_player = PLAYER
+            # AI 回合 - 使用后台计算，不阻塞界面
+            if self.game_state == GAME_RUNNING and self.current_player == AI and not self.ai_thinking:
+                if self.ai_move_result is None:
+                    # 开始后台计算
+                    self.ai_thinking = True
+                    self.ai_thread = threading.Thread(target=self.calculate_ai_move_async)
+                    self.ai_thread.start()
+                elif not self.ai_thinking and self.ai_move_result is not None:
+                    # 计算完成，执行落子
+                    ax, ay = self.ai_move_result
+                    self.timer.lap(is_ai=True)
+                    move_time = self.timer.last_move_time
+                    
+                    self.step += 1
+                    self.board[ay][ax] = AI
+                    self.history.append((ax, ay))
+                    self.sound_manager.play_click()
+                    
+                    coord = f"{chr(65 + ax)}{ay + 1}"
+                    record = {
+                        'step': self.step,
+                        'player': AI,
+                        'coord': coord,
+                        'time': move_time
+                    }
+                    self.move_records.append(record)
+                    print(f"第 {self.step} 步：AI -> {coord} (用时：{move_time:.2f}秒)")
+                    
+                    # 自动保存棋谱
+                    self.auto_save_record()
+                    
+                    if self.check_win(self.board, ax, ay, AI):
+                        self.game_state = AI_WIN
+                        self.winner = AI
+                        self.timer.stop()
+                        print("*** AI 获胜！ ***")
+                        # 游戏结束，自动保存完整棋谱
+                        self.auto_save_record(force_save=True)
+                    elif self.step == BOARD_SIZE * BOARD_SIZE:
+                        self.game_state = DRAW
+                        self.timer.stop()
+                        print("*** 平局！ ***")
+                        # 游戏结束，自动保存完整棋谱
+                        self.auto_save_record(force_save=True)
+                    else:
+                        self.current_player = PLAYER
+                    
+                    # 重置 AI 状态
+                    self.ai_move_result = None
             
             # 绘制
             self.draw_board()
@@ -564,7 +769,7 @@ class GomokuGame:
                     elif self.board[y][x] == AI:
                         self.draw_piece(x, y, False)
             
-            # 绘制高亮（鼠标悬停）
+            # 绘制高亮（鼠标悬停）和 AI 思考提示
             if self.game_state == GAME_RUNNING and self.current_player == PLAYER:
                 mx, my = self.mouse_pos
                 if my >= MENU_HEIGHT + MARGIN:
@@ -577,6 +782,15 @@ class GomokuGame:
                         s = pygame.Surface((GRID, GRID), pygame.SRCALPHA)
                         pygame.draw.circle(s, (0, 0, 0, 100), (GRID // 2, GRID // 2), GRID // 2 - 2)
                         self.screen.blit(s, (cx - GRID // 2, cy - GRID // 2))
+            
+            # AI 思考中的提示
+            if self.ai_thinking:
+                think_text = "AI 思考中..."
+                think_surf = self.font_small.render(think_text, True, (255, 0, 0))
+                # 居中显示在顶部
+                text_rect = think_surf.get_rect(center=(SCREEN_WIDTH // 2, MENU_HEIGHT + 10))
+                pygame.draw.rect(self.screen, (255, 255, 255), text_rect.inflate(20, 10))
+                self.screen.blit(think_surf, text_rect)
             
             self.draw_win()
             self.draw_info()
