@@ -4,7 +4,7 @@
 
 这是一款**人机对战五子棋游戏**，采用 Python + Pygame 开发。具有智能 AI、实时计时、自动保存、棋谱管理等特色功能。
 
-![版本](https://img.shields.io/badge/版本 -3.2-blue)
+![Version](https://img.shields.io/badge/Version-3.2-blue)
 ![Python](https://img.shields.io/badge/Python-3.10+-green)
 ![Pygame](https://img.shields.io/badge/Pygame-2.6.1-red)
 
